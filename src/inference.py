@@ -6,18 +6,49 @@ from pathlib import Path
 from typing import List
 import time
 from .feature_engineering import DomainFeatureExtractor
-from .model_training import GamblingDomainClassifier
+from .model_training import GamblingDomainClassifier, RandomForestDomainClassifier
 from .utils import normalize_domain
 
 
 class DomainClassifierInference:
     """Inference engine for gambling domain classification."""
 
-    def __init__(self, model_path: Path):
-        """Initialize inference engine."""
+    def __init__(self, model_path: Path, model_type: str = 'auto'):
+        """
+        Initialize inference engine.
+
+        Args:
+            model_path: Path to model directory
+            model_type: Type of model ('logistic', 'random_forest', or 'auto' to detect)
+        """
         self.model_path = model_path
-        self.classifier = GamblingDomainClassifier()
         self.feature_extractor = DomainFeatureExtractor()
+
+        # Auto-detect model type if not specified
+        if model_type == 'auto':
+            logistic_exists = (model_path / 'logistic_regression.joblib').exists()
+            rf_exists = (model_path / 'random_forest.joblib').exists()
+
+            if rf_exists and not logistic_exists:
+                model_type = 'random_forest'
+            elif logistic_exists and not rf_exists:
+                model_type = 'logistic'
+            elif rf_exists and logistic_exists:
+                # Both exist, prefer RF (newer/better)
+                model_type = 'random_forest'
+                print("Note: Both models found, using Random Forest")
+            else:
+                raise FileNotFoundError(f"No model files found in {model_path}")
+
+        self.model_type = model_type
+
+        # Instantiate appropriate classifier
+        if model_type == 'logistic':
+            self.classifier = GamblingDomainClassifier()
+            print("Loading Logistic Regression model...")
+        else:  # random_forest
+            self.classifier = RandomForestDomainClassifier()
+            print("Loading Random Forest model...")
 
         # Load model and feature extractor
         self.classifier.load(model_path)
@@ -140,7 +171,7 @@ def load_domains_from_file(file_path: Path) -> List[str]:
 
 
 def run_inference(input_file: Path, model_path: Path, output_dir: Path,
-                 confidence_threshold: float = 0.8):
+                 confidence_threshold: float = 0.8, model_type: str = 'auto'):
     """Run inference on domains from input file."""
     print("=" * 60)
     print("GAMBLING DOMAIN CLASSIFIER - INFERENCE")
@@ -151,7 +182,7 @@ def run_inference(input_file: Path, model_path: Path, output_dir: Path,
     print(f"Loaded {len(domains)} domains from {input_file}")
 
     # Initialize inference engine
-    inference = DomainClassifierInference(model_path)
+    inference = DomainClassifierInference(model_path, model_type=model_type)
 
     # Predict
     results = inference.predict_batch(domains)

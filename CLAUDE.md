@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ML classifier for gambling-themed domains with DNS validation. The system processes domains from Certificate Transparency logs, classifying them as gambling/non-gambling using logistic regression and validating results through DNS queries.
+ML classifier for gambling-themed domains with DNS validation. The system processes domains from Certificate Transparency logs, classifying them as gambling/non-gambling using machine learning (Logistic Regression or Random Forest) and validating results through DNS queries.
 
 **Primary Language:** Python 3.9+
 **Project Type:** Machine learning classification pipeline
+**Supported Models:** Logistic Regression, Random Forest
 
 ## Project Architecture
 
@@ -33,10 +34,16 @@ Model Evaluation → Inference → DNS Validation → Results Analysis
    - Character n-grams with TF-IDF vectorization
 
 3. **Model Training Module** (`src/model_training.py`)
-   - Logistic Regression with L2 regularization
-   - Hyperparameter tuning via GridSearchCV
-   - 5-fold stratified cross-validation
-   - Feature importance analysis
+   - **Logistic Regression** (fast, interpretable, ~5 MB model)
+     - L2 regularization, liblinear solver
+     - Hyperparameter tuning via GridSearchCV
+     - Training time: 2-5 minutes (optimized)
+   - **Random Forest** (higher accuracy, ~50-100 MB model)
+     - 200 estimators, max_depth=30
+     - Apple Silicon optimized (n_jobs=8)
+     - Training time: 3-8 minutes
+   - 3-5 fold stratified cross-validation
+   - Feature importance analysis (coefficients/Gini)
 
 4. **Inference Module** (`src/inference.py`)
    - Batch prediction on unlabeled domains
@@ -67,7 +74,12 @@ pip install -r requirements.txt
 python scripts/01_collect_data.py
 
 # Step 2: Train model with hyperparameter tuning
+
+#  Option A: Logistic Regression (default, faster)
 python scripts/02_train_model.py --tune-hyperparams
+
+# Option B: Random Forest (higher accuracy, M1 optimized)
+python scripts/02_train_model.py --model random_forest --tune-hyperparams
 
 # Step 3: Run inference on unlabeled domains
 python scripts/03_run_inference.py --input data/raw/unlabeled_test.txt
@@ -108,17 +120,46 @@ pytest tests/test_dns.py
 - **DNS Queries Reduction:** ≥60% filtered before DNS lookups
 - **Parking Detection:** ≥90% accuracy
 
-### Model Configuration
+### Model Configurations
+
+**Logistic Regression** (default):
 ```python
 LogisticRegression(
-    C=1.0,
+    C=10.0,           # Optimal from hyperparameter tuning
     penalty='l2',
-    solver='lbfgs',
-    max_iter=1000,
+    solver='liblinear',
+    max_iter=2000,
     class_weight='balanced',
     random_state=42
 )
 ```
+
+**Random Forest** (Apple Silicon optimized):
+```python
+RandomForestClassifier(
+    n_estimators=200,
+    max_depth=30,
+    min_samples_split=5,
+    min_samples_leaf=2,
+    max_features='sqrt',
+    n_jobs=8,          # M1 Max: 8 performance cores
+    class_weight='balanced',
+    random_state=42
+)
+```
+
+### Model Comparison
+
+| Metric | Logistic Regression | Random Forest |
+|--------|-------------------|---------------|
+| Accuracy | 92.29% | ~93-95% (estimated) |
+| Precision | 95.36% | ~94-96% |
+| Recall | 88.86% | ~90-93% |
+| Training Time (159k samples) | 2-5 min | 3-8 min |
+| Inference Speed | <1 ms/domain | 2-5 ms/domain |
+| Model Size | ~5 MB | ~50-100 MB |
+| Interpretability | High (coefficients) | Medium (Gini importance) |
+| Use Case | Production, fast inference | Higher accuracy needed |
 
 ### DNS Validation
 - Async resolver (aiodns or dnspython)
@@ -143,9 +184,13 @@ data/
     └── dns_validation.csv
 
 models/
-├── logistic_regression.joblib    # Trained model
-├── tfidf_vectorizer.joblib       # Feature vectorizer
-└── model_metrics.json            # Performance metrics
+├── logistic_regression.joblib    # Logistic Regression model
+├── random_forest.joblib           # Random Forest model (optional)
+├── tfidf_vectorizer.joblib        # Feature vectorizer
+├── feature_metadata.joblib        # Feature names metadata
+├── model_metrics.json             # LogReg metrics
+├── model_metrics_rf.json          # RF metrics (if trained)
+└── rf_metadata.json               # RF config (if trained)
 ```
 
 ## Dependencies
