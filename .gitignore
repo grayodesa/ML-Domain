@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Data files
+data/raw/*.txt
+data/processed/
+data/results/
+*.csv
+*.json
+*.joblib
+*.pkl
+
+# Model artifacts
+models/*.joblib
+models/*.pkl
+models/*.json
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+test_*.py
+temp/
+tmp/
+
+# Session files
+.claude/sessions/

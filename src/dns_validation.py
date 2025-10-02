@@ -1,0 +1,476 @@
+"""DNS validation module for gambling domain classification."""
+
+import asyncio
+import time
+from typing import List, Dict, Set, Optional, Tuple
+from pathlib import Path
+import json
+import pandas as pd
+from dataclasses import dataclass, asdict
+import aiodns
+import socket
+
+
+# Known parking nameservers (from specs and MISP warninglists)
+PARKING_NAMESERVERS_2025 = {
+    'sedoparking.com',
+    'bodis.com',
+    'parkingcrew.net',
+    'parklogic.com',
+    'above.com',
+    'afternic.com',
+    'namebrightdns.com',
+    'dns-parking.com',
+    'ztomy.com',
+    'domaincontrol.com',  # GoDaddy
+    'registrar-servers.com',  # Namecheap
+}
+
+# Known parking IPs (updated 2025)
+PARKING_IPS_2025 = {
+    '3.33.130.190',      # GoDaddy AWS
+    '15.197.148.33',     # GoDaddy AWS
+    '50.63.202.32',      # GoDaddy legacy
+    '199.59.242.150',    # Bodis
+}
+
+# Public DNS servers (for round-robin)
+DNS_SERVERS = [
+    '8.8.8.8',           # Google
+    '8.8.4.4',           # Google
+    '1.1.1.1',           # Cloudflare
+    '1.0.0.1',           # Cloudflare
+]
+
+
+@dataclass
+class DNSResult:
+    """DNS validation result for a single domain."""
+    domain: str
+    ns_records: List[str]
+    a_records: List[str]
+    is_parked: bool
+    parking_provider: Optional[str]
+    query_status: str  # success, timeout, nxdomain, error
+    query_time: float
+
+
+class RateLimiter:
+    """Token bucket rate limiter for DNS queries."""
+
+    def __init__(self, rate: float = 10.0):
+        """
+        Initialize rate limiter.
+
+        Args:
+            rate: Maximum queries per second (default: 10)
+        """
+        self.rate = rate
+        self.tokens = rate
+        self.last_update = time.time()
+        self.lock = asyncio.Lock()
+
+    async def acquire(self):
+        """Acquire permission to make a query."""
+        async with self.lock:
+            now = time.time()
+            elapsed = now - self.last_update
+            self.tokens = min(self.rate, self.tokens + elapsed * self.rate)
+            self.last_update = now
+
+            if self.tokens < 1:
+                sleep_time = (1 - self.tokens) / self.rate
+                await asyncio.sleep(sleep_time)
+                self.tokens = 0
+            else:
+                self.tokens -= 1
+
+
+class DNSValidator:
+    """Validates domains using DNS queries to detect parking."""
+
+    def __init__(
+        self,
+        timeout: float = 5.0,
+        max_retries: int = 2,
+        rate_limit: float = 10.0,
+        concurrency: int = 100
+    ):
+        """
+        Initialize DNS validator.
+
+        Args:
+            timeout: Timeout in seconds for DNS queries
+            max_retries: Maximum retry attempts for failed queries
+            rate_limit: Maximum queries per second
+            concurrency: Maximum concurrent queries
+        """
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.rate_limiter = RateLimiter(rate_limit)
+        self.semaphore = asyncio.Semaphore(concurrency)
+        self.dns_server_index = 0
+
+    def _get_next_dns_server(self) -> str:
+        """Get next DNS server in round-robin fashion."""
+        server = DNS_SERVERS[self.dns_server_index]
+        self.dns_server_index = (self.dns_server_index + 1) % len(DNS_SERVERS)
+        return server
+
+    def _check_parking_ns(self, ns_records: List[str]) -> Tuple[bool, Optional[str]]:
+        """
+        Check if NS records indicate parking.
+
+        Args:
+            ns_records: List of nameserver records
+
+        Returns:
+            Tuple of (is_parked, parking_provider)
+        """
+        for ns in ns_records:
+            ns_lower = ns.lower().rstrip('.')
+            for parking_ns in PARKING_NAMESERVERS_2025:
+                if parking_ns in ns_lower:
+                    return True, parking_ns
+        return False, None
+
+    def _check_parking_ip(self, a_records: List[str]) -> Tuple[bool, Optional[str]]:
+        """
+        Check if A records indicate parking.
+
+        Args:
+            a_records: List of A records (IP addresses)
+
+        Returns:
+            Tuple of (is_parked, parking_provider)
+        """
+        for ip in a_records:
+            if ip in PARKING_IPS_2025:
+                return True, f"IP:{ip}"
+        return False, None
+
+    async def _query_ns_records(self, domain: str, resolver: aiodns.DNSResolver) -> List[str]:
+        """
+        Query NS records for a domain.
+
+        Args:
+            domain: Domain name to query
+            resolver: aiodns resolver instance
+
+        Returns:
+            List of nameserver records
+        """
+        try:
+            result = await resolver.query(domain, 'NS')
+            return [ns.host for ns in result]
+        except aiodns.error.DNSError:
+            return []
+
+    async def _query_a_records(self, domain: str, resolver: aiodns.DNSResolver) -> List[str]:
+        """
+        Query A records for a domain.
+
+        Args:
+            domain: Domain name to query
+            resolver: aiodns resolver instance
+
+        Returns:
+            List of IP addresses
+        """
+        try:
+            result = await resolver.query(domain, 'A')
+            return [r.host for r in result]
+        except aiodns.error.DNSError:
+            return []
+
+    async def _validate_domain(self, domain: str) -> DNSResult:
+        """
+        Validate a single domain with retries.
+
+        Args:
+            domain: Domain to validate
+
+        Returns:
+            DNSResult object
+        """
+        async with self.semaphore:
+            await self.rate_limiter.acquire()
+
+            start_time = time.time()
+            ns_records = []
+            a_records = []
+            query_status = "error"
+
+            for attempt in range(self.max_retries + 1):
+                try:
+                    # Get DNS server for this attempt
+                    dns_server = self._get_next_dns_server()
+                    resolver = aiodns.DNSResolver(
+                        timeout=self.timeout,
+                        nameservers=[dns_server]
+                    )
+
+                    # Query NS and A records concurrently
+                    ns_task = self._query_ns_records(domain, resolver)
+                    a_task = self._query_a_records(domain, resolver)
+
+                    ns_records, a_records = await asyncio.gather(ns_task, a_task)
+
+                    # Determine query status
+                    if not ns_records and not a_records:
+                        query_status = "nxdomain"
+                    else:
+                        query_status = "success"
+                    break
+
+                except asyncio.TimeoutError:
+                    query_status = "timeout"
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(0.5)  # Brief pause before retry
+
+                except Exception as e:
+                    query_status = f"error: {str(e)}"
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(0.5)
+
+            query_time = time.time() - start_time
+
+            # Check for parking
+            is_parked = False
+            parking_provider = None
+
+            if query_status == "success":
+                # Check NS records first
+                is_parked_ns, provider_ns = self._check_parking_ns(ns_records)
+                if is_parked_ns:
+                    is_parked = True
+                    parking_provider = provider_ns
+                else:
+                    # Check A records if NS check didn't find parking
+                    is_parked_ip, provider_ip = self._check_parking_ip(a_records)
+                    if is_parked_ip:
+                        is_parked = True
+                        parking_provider = provider_ip
+
+            return DNSResult(
+                domain=domain,
+                ns_records=ns_records,
+                a_records=a_records,
+                is_parked=is_parked,
+                parking_provider=parking_provider,
+                query_status=query_status,
+                query_time=query_time
+            )
+
+    async def validate_batch(self, domains: List[str]) -> List[DNSResult]:
+        """
+        Validate a batch of domains.
+
+        Args:
+            domains: List of domains to validate
+
+        Returns:
+            List of DNSResult objects
+        """
+        tasks = [self._validate_domain(domain) for domain in domains]
+        results = await asyncio.gather(*tasks)
+        return results
+
+    def validate_batch_sync(self, domains: List[str]) -> List[DNSResult]:
+        """
+        Synchronous wrapper for validate_batch.
+
+        Args:
+            domains: List of domains to validate
+
+        Returns:
+            List of DNSResult objects
+        """
+        return asyncio.run(self.validate_batch(domains))
+
+
+class DNSValidationPipeline:
+    """Complete DNS validation pipeline with reporting."""
+
+    def __init__(self, validator: Optional[DNSValidator] = None):
+        """
+        Initialize DNS validation pipeline.
+
+        Args:
+            validator: DNSValidator instance (creates default if None)
+        """
+        self.validator = validator or DNSValidator()
+
+    def run(
+        self,
+        predictions_file: Path,
+        output_dir: Path,
+        confidence_threshold: float = 0.8,
+        filter_gambling: bool = True
+    ) -> Dict:
+        """
+        Run DNS validation pipeline.
+
+        Args:
+            predictions_file: Path to predictions CSV
+            output_dir: Directory for output files
+            confidence_threshold: Minimum confidence to validate
+            filter_gambling: If True, filter for gambling predictions; if False, validate all
+
+        Returns:
+            Statistics dictionary
+        """
+        print("=" * 60)
+        print("DNS VALIDATION PIPELINE")
+        print("=" * 60)
+
+        # Load predictions
+        print(f"\nLoading predictions from {predictions_file}...")
+        df = pd.read_csv(predictions_file)
+
+        # Filter for gambling predictions above threshold
+        if filter_gambling:
+            gambling_mask = (df['prediction'] == 1) & (df['confidence'] >= confidence_threshold)
+            gambling_domains = df[gambling_mask]['domain'].tolist()
+            print(f"Total predictions: {len(df)}")
+            print(f"Gambling predictions (≥{confidence_threshold} confidence): {len(gambling_domains)}")
+        else:
+            # Apply only confidence threshold (assumes all are gambling already)
+            if 'confidence' in df.columns:
+                gambling_domains = df[df['confidence'] >= confidence_threshold]['domain'].tolist()
+                print(f"Total domains: {len(df)}")
+                print(f"Domains with ≥{confidence_threshold} confidence: {len(gambling_domains)}")
+            else:
+                gambling_domains = df['domain'].tolist()
+                print(f"Total domains to validate: {len(gambling_domains)}")
+
+        if not gambling_domains:
+            print("\nNo gambling domains to validate!")
+            return {}
+
+        # Run DNS validation
+        print(f"\nValidating {len(gambling_domains)} domains...")
+        print(f"Settings: timeout={self.validator.timeout}s, "
+              f"rate_limit={self.validator.rate_limiter.rate} qps, "
+              f"concurrency={self.validator.semaphore._value}")
+
+        start_time = time.time()
+        results = self.validator.validate_batch_sync(gambling_domains)
+        elapsed = time.time() - start_time
+
+        print(f"\nCompleted in {elapsed:.2f} seconds")
+        print(f"Average: {len(gambling_domains)/elapsed:.1f} domains/second")
+
+        # Convert results to DataFrame
+        results_data = [asdict(r) for r in results]
+        results_df = pd.DataFrame(results_data)
+
+        # Convert lists to JSON strings for CSV
+        results_df['ns_records'] = results_df['ns_records'].apply(json.dumps)
+        results_df['a_records'] = results_df['a_records'].apply(json.dumps)
+
+        # Calculate statistics
+        stats = self._calculate_stats(results)
+
+        # Save outputs
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self._save_outputs(results, results_df, stats, output_dir)
+
+        # Print summary
+        self._print_summary(stats)
+
+        return stats
+
+    def _calculate_stats(self, results: List[DNSResult]) -> Dict:
+        """Calculate validation statistics."""
+        total = len(results)
+        active = sum(1 for r in results if not r.is_parked and r.query_status == "success")
+        parked = sum(1 for r in results if r.is_parked)
+        success = sum(1 for r in results if r.query_status == "success")
+        timeout = sum(1 for r in results if r.query_status == "timeout")
+        nxdomain = sum(1 for r in results if r.query_status == "nxdomain")
+        error = sum(1 for r in results if r.query_status.startswith("error"))
+
+        # Parking provider breakdown
+        parking_providers = {}
+        for r in results:
+            if r.is_parked and r.parking_provider:
+                parking_providers[r.parking_provider] = parking_providers.get(r.parking_provider, 0) + 1
+
+        # Average query time
+        avg_query_time = sum(r.query_time for r in results) / total if total > 0 else 0
+
+        return {
+            'total_domains': total,
+            'active_domains': active,
+            'parked_domains': parked,
+            'successful_queries': success,
+            'timeout_queries': timeout,
+            'nxdomain_queries': nxdomain,
+            'error_queries': error,
+            'success_rate_pct': (success / total * 100) if total > 0 else 0,
+            'parking_rate_pct': (parked / success * 100) if success > 0 else 0,
+            'active_rate_pct': (active / success * 100) if success > 0 else 0,
+            'avg_query_time': avg_query_time,
+            'parking_providers': parking_providers
+        }
+
+    def _save_outputs(
+        self,
+        results: List[DNSResult],
+        results_df: pd.DataFrame,
+        stats: Dict,
+        output_dir: Path
+    ):
+        """Save all output files."""
+        # Save full results CSV
+        results_path = output_dir / 'dns_validation.csv'
+        results_df.to_csv(results_path, index=False)
+        print(f"\nFull results saved to {results_path}")
+
+        # Save active domains list
+        active_domains = [r.domain for r in results if not r.is_parked and r.query_status == "success"]
+        active_path = output_dir / 'active_gambling_domains.txt'
+        with open(active_path, 'w') as f:
+            f.write('\n'.join(active_domains))
+        print(f"Active domains saved to {active_path}")
+
+        # Save parked domains list
+        parked_domains = [r.domain for r in results if r.is_parked]
+        parked_path = output_dir / 'parked_gambling_domains.txt'
+        with open(parked_path, 'w') as f:
+            f.write('\n'.join(parked_domains))
+        print(f"Parked domains saved to {parked_path}")
+
+        # Save statistics
+        stats_path = output_dir / 'dns_validation_stats.json'
+        with open(stats_path, 'w') as f:
+            json.dump(stats, f, indent=2)
+        print(f"Statistics saved to {stats_path}")
+
+    def _print_summary(self, stats: Dict):
+        """Print validation summary."""
+        print("\n" + "=" * 60)
+        print("VALIDATION SUMMARY")
+        print("=" * 60)
+        print(f"\nTotal domains validated: {stats['total_domains']}")
+        print(f"Successful queries: {stats['successful_queries']} ({stats['success_rate_pct']:.1f}%)")
+        print(f"Failed queries: timeout={stats['timeout_queries']}, "
+              f"nxdomain={stats['nxdomain_queries']}, "
+              f"error={stats['error_queries']}")
+
+        print(f"\n--- Results (of successful queries) ---")
+        print(f"Active gambling domains: {stats['active_domains']} ({stats['active_rate_pct']:.1f}%)")
+        print(f"Parked domains: {stats['parked_domains']} ({stats['parking_rate_pct']:.1f}%)")
+
+        if stats['parking_providers']:
+            print(f"\n--- Parking Providers ---")
+            for provider, count in sorted(stats['parking_providers'].items(), key=lambda x: -x[1]):
+                print(f"  {provider}: {count}")
+
+        print(f"\nAverage query time: {stats['avg_query_time']:.3f} seconds")
+
+
+if __name__ == '__main__':
+    # This will be called from the validation script
+    pass
