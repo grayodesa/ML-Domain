@@ -21,9 +21,9 @@ data/results/
 *.pkl
 
 # Model artifacts
-models/*.joblib
-models/*.pkl
-models/*.json
+#models/*.joblib
+#models/*.pkl
+#models/*.json
 
 # Jupyter
 .ipynb_checkpoints/

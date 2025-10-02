@@ -30,8 +30,10 @@ PARKING_NAMESERVERS_2025 = {
 PARKING_IPS_2025 = {
     '3.33.130.190',      # GoDaddy AWS
     '15.197.148.33',     # GoDaddy AWS
+    '13.248.213.45',     # GoDaddy AWS
     '50.63.202.32',      # GoDaddy legacy
     '199.59.242.150',    # Bodis
+    '76.223.26.96',      # Namecheap
 }
 
 # Public DNS servers (for round-robin)
@@ -40,6 +42,13 @@ DNS_SERVERS = [
     '8.8.4.4',           # Google
     '1.1.1.1',           # Cloudflare
     '1.0.0.1',           # Cloudflare
+    '9.9.9.9',           # Quad9
+    '149.112.112.112',   # Quad9
+    '198.54.117.10',     # Namecheap
+    '86.54.11.100',      # DNS4EU
+    '86.54.11.200',      # DNS4EU
+    '45.90.28.0',        # NextDNS
+    '45.90.28.255',      # NextDNS
 ]
 
 
