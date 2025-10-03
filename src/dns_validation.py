@@ -22,8 +22,8 @@ PARKING_NAMESERVERS_2025 = {
     'namebrightdns.com',
     'dns-parking.com',
     'ztomy.com',
-    'domaincontrol.com',  # GoDaddy
-    'registrar-servers.com',  # Namecheap
+#    'domaincontrol.com',  # GoDaddy
+#    'registrar-servers.com',  # Namecheap
 }
 
 # Known parking IPs (updated 2025)
@@ -34,6 +34,22 @@ PARKING_IPS_2025 = {
     '50.63.202.32',      # GoDaddy legacy
     '199.59.242.150',    # Bodis
     '76.223.26.96',      # Namecheap
+    '75.2.115.196',
+    '75.2.18.233',
+    '13.248.148.254',
+    '76.223.26.96',
+    '199.59.243.228',
+    '185.53.177.52',
+    '185.53.177.50',
+    '185.53.177.54',
+    '208.91.197.27',
+    '185.53.177.53',
+    '185.53.177.51',
+    '185.53.178.50',
+    '91.195.240.12',
+    '23.227.38.65',
+    '15.197.130.221',    
+    '185.53.178.54'
 }
 
 # Local Unbound DNS server
