@@ -14,10 +14,10 @@ build/
 # Data files
 data/raw/*.txt
 data/processed/
-data/results/
-*.csv
+#data/results/
+#*.csv
 *.json
-*.joblib
+#*.joblib
 *.pkl
 
 # Model artifacts

@@ -145,9 +145,10 @@ class DomainFeatureExtractor:
         """Create feature matrix for a list of domains."""
         print(f"Extracting features for {len(domains)} domains...")
 
-        # Extract manual features
+        # Extract manual features with progress bar
+        from tqdm import tqdm
         manual_features = []
-        for domain in domains:
+        for domain in tqdm(domains, desc="Extracting manual features", unit="domain"):
             features = self.extract_features_single(domain)
             manual_features.append(features)
 

@@ -36,19 +36,9 @@ PARKING_IPS_2025 = {
     '76.223.26.96',      # Namecheap
 }
 
-# Public DNS servers (for round-robin)
+# Local Unbound DNS server
 DNS_SERVERS = [
-    '8.8.8.8',           # Google
-    '8.8.4.4',           # Google
-    '1.1.1.1',           # Cloudflare
-    '1.0.0.1',           # Cloudflare
-    '9.9.9.9',           # Quad9
-    '149.112.112.112',   # Quad9
-    '198.54.117.10',     # Namecheap
-    '86.54.11.100',      # DNS4EU
-    '86.54.11.200',      # DNS4EU
-    '45.90.28.0',        # NextDNS
-    '45.90.28.255',      # NextDNS
+    '127.0.0.1',         # Local Unbound resolver
 ]
 
 
@@ -58,6 +48,7 @@ class DNSResult:
     domain: str
     ns_records: List[str]
     a_records: List[str]
+    cname_records: List[str]
     is_parked: bool
     parking_provider: Optional[str]
     query_status: str  # success, timeout, nxdomain, error
@@ -192,6 +183,23 @@ class DNSValidator:
         except aiodns.error.DNSError:
             return []
 
+    async def _query_cname_records(self, domain: str, resolver: aiodns.DNSResolver) -> List[str]:
+        """
+        Query CNAME records for a domain.
+
+        Args:
+            domain: Domain name to query
+            resolver: aiodns resolver instance
+
+        Returns:
+            List of CNAME targets
+        """
+        try:
+            result = await resolver.query(domain, 'CNAME')
+            return [r.cname for r in result]
+        except aiodns.error.DNSError:
+            return []
+
     async def _validate_domain(self, domain: str) -> DNSResult:
         """
         Validate a single domain with retries.
@@ -208,6 +216,7 @@ class DNSValidator:
             start_time = time.time()
             ns_records = []
             a_records = []
+            cname_records = []
             query_status = "error"
 
             for attempt in range(self.max_retries + 1):
@@ -219,14 +228,15 @@ class DNSValidator:
                         nameservers=[dns_server]
                     )
 
-                    # Query NS and A records concurrently
+                    # Query NS, A, and CNAME records concurrently
                     ns_task = self._query_ns_records(domain, resolver)
                     a_task = self._query_a_records(domain, resolver)
+                    cname_task = self._query_cname_records(domain, resolver)
 
-                    ns_records, a_records = await asyncio.gather(ns_task, a_task)
+                    ns_records, a_records, cname_records = await asyncio.gather(ns_task, a_task, cname_task)
 
                     # Determine query status
-                    if not ns_records and not a_records:
+                    if not ns_records and not a_records and not cname_records:
                         query_status = "nxdomain"
                     else:
                         query_status = "success"
@@ -265,6 +275,7 @@ class DNSValidator:
                 domain=domain,
                 ns_records=ns_records,
                 a_records=a_records,
+                cname_records=cname_records,
                 is_parked=is_parked,
                 parking_provider=parking_provider,
                 query_status=query_status,
@@ -377,6 +388,7 @@ class DNSValidationPipeline:
         # Convert lists to JSON strings for CSV
         results_df['ns_records'] = results_df['ns_records'].apply(json.dumps)
         results_df['a_records'] = results_df['a_records'].apply(json.dumps)
+        results_df['cname_records'] = results_df['cname_records'].apply(json.dumps)
 
         # Calculate statistics
         stats = self._calculate_stats(results)
