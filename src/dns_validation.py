@@ -1,4 +1,4 @@
-"""DNS validation module for gambling domain classification."""
+"""DNS validation module for gambling domain classification - OPTIMIZED for Unbound."""
 
 import asyncio
 import time
@@ -22,8 +22,6 @@ PARKING_NAMESERVERS_2025 = {
     'namebrightdns.com',
     'dns-parking.com',
     'ztomy.com',
-#    'domaincontrol.com',  # GoDaddy
-#    'registrar-servers.com',  # Namecheap
 }
 
 # Known parking IPs (updated 2025)
@@ -71,67 +69,44 @@ class DNSResult:
     query_time: float
 
 
-class RateLimiter:
-    """Token bucket rate limiter for DNS queries."""
-
-    def __init__(self, rate: float = 10.0):
-        """
-        Initialize rate limiter.
-
-        Args:
-            rate: Maximum queries per second (default: 10)
-        """
-        self.rate = rate
-        self.tokens = rate
-        self.last_update = time.time()
-        self.lock = asyncio.Lock()
-
-    async def acquire(self):
-        """Acquire permission to make a query."""
-        async with self.lock:
-            now = time.time()
-            elapsed = now - self.last_update
-            self.tokens = min(self.rate, self.tokens + elapsed * self.rate)
-            self.last_update = now
-
-            if self.tokens < 1:
-                sleep_time = (1 - self.tokens) / self.rate
-                await asyncio.sleep(sleep_time)
-                self.tokens = 0
-            else:
-                self.tokens -= 1
-
-
 class DNSValidator:
-    """Validates domains using DNS queries to detect parking."""
+    """Validates domains using DNS queries to detect parking - OPTIMIZED for local Unbound."""
 
     def __init__(
         self,
-        timeout: float = 5.0,
+        timeout: float = 10.0,
         max_retries: int = 2,
-        rate_limit: float = 10.0,
-        concurrency: int = 100
+        concurrency: int = 1500  # INCREASED from 100
     ):
         """
         Initialize DNS validator.
 
         Args:
-            timeout: Timeout in seconds for DNS queries
+            timeout: Timeout in seconds for DNS queries (increased for reliability)
             max_retries: Maximum retry attempts for failed queries
-            rate_limit: Maximum queries per second
-            concurrency: Maximum concurrent queries
+            concurrency: Maximum concurrent queries (optimized for Unbound)
         """
         self.timeout = timeout
         self.max_retries = max_retries
-        self.rate_limiter = RateLimiter(rate_limit)
+        # REMOVED: rate_limiter - not needed for local DNS
         self.semaphore = asyncio.Semaphore(concurrency)
-        self.dns_server_index = 0
-
-    def _get_next_dns_server(self) -> str:
-        """Get next DNS server in round-robin fashion."""
-        server = DNS_SERVERS[self.dns_server_index]
-        self.dns_server_index = (self.dns_server_index + 1) % len(DNS_SERVERS)
-        return server
+        
+        # Create single persistent resolver for better performance
+        self.resolver = aiodns.DNSResolver(
+            timeout=self.timeout,
+            nameservers=DNS_SERVERS,
+            tries=1  # We handle retries ourselves
+        )
+        
+        # Statistics for monitoring
+        self.stats = {
+            'queries': 0,
+            'success': 0,
+            'errors': 0,
+            'timeouts': 0,
+            'nxdomain': 0
+        }
+        self.stats_lock = asyncio.Lock()
 
     def _check_parking_ns(self, ns_records: List[str]) -> Tuple[bool, Optional[str]]:
         """
@@ -165,56 +140,66 @@ class DNSValidator:
                 return True, f"IP:{ip}"
         return False, None
 
-    async def _query_ns_records(self, domain: str, resolver: aiodns.DNSResolver) -> List[str]:
+    async def _query_ns_records(self, domain: str) -> List[str]:
         """
         Query NS records for a domain.
 
         Args:
             domain: Domain name to query
-            resolver: aiodns resolver instance
 
         Returns:
             List of nameserver records
         """
         try:
-            result = await resolver.query(domain, 'NS')
+            result = await self.resolver.query(domain, 'NS')
             return [ns.host for ns in result]
         except aiodns.error.DNSError:
             return []
 
-    async def _query_a_records(self, domain: str, resolver: aiodns.DNSResolver) -> List[str]:
+    async def _query_a_records(self, domain: str) -> List[str]:
         """
         Query A records for a domain.
 
         Args:
             domain: Domain name to query
-            resolver: aiodns resolver instance
 
         Returns:
             List of IP addresses
         """
         try:
-            result = await resolver.query(domain, 'A')
+            result = await self.resolver.query(domain, 'A')
             return [r.host for r in result]
         except aiodns.error.DNSError:
             return []
 
-    async def _query_cname_records(self, domain: str, resolver: aiodns.DNSResolver) -> List[str]:
+    async def _query_cname_records(self, domain: str) -> List[str]:
         """
         Query CNAME records for a domain.
 
         Args:
             domain: Domain name to query
-            resolver: aiodns resolver instance
 
         Returns:
             List of CNAME targets
         """
         try:
-            result = await resolver.query(domain, 'CNAME')
+            result = await self.resolver.query(domain, 'CNAME')
             return [r.cname for r in result]
         except aiodns.error.DNSError:
             return []
+
+    async def _update_stats(self, status: str):
+        """Update statistics thread-safely."""
+        async with self.stats_lock:
+            self.stats['queries'] += 1
+            if status == 'success':
+                self.stats['success'] += 1
+            elif status == 'timeout':
+                self.stats['timeouts'] += 1
+            elif status == 'nxdomain':
+                self.stats['nxdomain'] += 1
+            else:
+                self.stats['errors'] += 1
 
     async def _validate_domain(self, domain: str) -> DNSResult:
         """
@@ -227,8 +212,8 @@ class DNSValidator:
             DNSResult object
         """
         async with self.semaphore:
-            await self.rate_limiter.acquire()
-
+            # REMOVED: rate limiter await - not needed!
+            
             start_time = time.time()
             ns_records = []
             a_records = []
@@ -237,19 +222,23 @@ class DNSValidator:
 
             for attempt in range(self.max_retries + 1):
                 try:
-                    # Get DNS server for this attempt
-                    dns_server = self._get_next_dns_server()
-                    resolver = aiodns.DNSResolver(
-                        timeout=self.timeout,
-                        nameservers=[dns_server]
+                    # Query NS, A, and CNAME records concurrently
+                    ns_task = self._query_ns_records(domain)
+                    a_task = self._query_a_records(domain)
+                    cname_task = self._query_cname_records(domain)
+
+                    ns_records, a_records, cname_records = await asyncio.gather(
+                        ns_task, a_task, cname_task,
+                        return_exceptions=True
                     )
 
-                    # Query NS, A, and CNAME records concurrently
-                    ns_task = self._query_ns_records(domain, resolver)
-                    a_task = self._query_a_records(domain, resolver)
-                    cname_task = self._query_cname_records(domain, resolver)
-
-                    ns_records, a_records, cname_records = await asyncio.gather(ns_task, a_task, cname_task)
+                    # Handle exceptions from gather
+                    if isinstance(ns_records, Exception):
+                        ns_records = []
+                    if isinstance(a_records, Exception):
+                        a_records = []
+                    if isinstance(cname_records, Exception):
+                        cname_records = []
 
                     # Determine query status
                     if not ns_records and not a_records and not cname_records:
@@ -261,14 +250,17 @@ class DNSValidator:
                 except asyncio.TimeoutError:
                     query_status = "timeout"
                     if attempt < self.max_retries:
-                        await asyncio.sleep(0.5)  # Brief pause before retry
+                        await asyncio.sleep(0.1)  # Shorter retry delay
 
                 except Exception as e:
                     query_status = f"error: {str(e)}"
                     if attempt < self.max_retries:
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.1)
 
             query_time = time.time() - start_time
+
+            # Update statistics
+            await self._update_stats(query_status)
 
             # Check for parking
             is_parked = False
@@ -300,7 +292,7 @@ class DNSValidator:
 
     async def validate_batch(self, domains: List[str]) -> List[DNSResult]:
         """
-        Validate a batch of domains.
+        Validate a batch of domains with progress reporting.
 
         Args:
             domains: List of domains to validate
@@ -308,8 +300,51 @@ class DNSValidator:
         Returns:
             List of DNSResult objects
         """
+        total = len(domains)
+        print(f"\nStarting validation of {total} domains...")
+        print(f"Concurrency: {self.semaphore._value}")
+        print(f"Timeout: {self.timeout}s")
+        print(f"Max retries: {self.max_retries}")
+        
+        start_time = time.time()
+        
+        # Create tasks
         tasks = [self._validate_domain(domain) for domain in domains]
-        results = await asyncio.gather(*tasks)
+        
+        # Progress tracking
+        completed = 0
+        last_report = start_time
+        
+        # Process with progress updates
+        results = []
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            results.append(result)
+            completed += 1
+            
+            # Report progress every 5 seconds
+            now = time.time()
+            if now - last_report >= 5.0:
+                elapsed = now - start_time
+                qps = completed / elapsed if elapsed > 0 else 0
+                eta = (total - completed) / qps if qps > 0 else 0
+                
+                print(f"Progress: {completed}/{total} ({completed/total*100:.1f}%) | "
+                      f"QPS: {qps:.0f} | "
+                      f"ETA: {eta/60:.1f}m | "
+                      f"Success: {self.stats['success']} | "
+                      f"Errors: {self.stats['errors']} | "
+                      f"Timeouts: {self.stats['timeouts']}")
+                last_report = now
+        
+        elapsed = time.time() - start_time
+        final_qps = total / elapsed if elapsed > 0 else 0
+        
+        print(f"\n✅ Validation complete!")
+        print(f"Total time: {elapsed:.1f}s")
+        print(f"Average QPS: {final_qps:.0f}")
+        print(f"Success rate: {self.stats['success']/total*100:.1f}%")
+        
         return results
 
     def validate_batch_sync(self, domains: List[str]) -> List[DNSResult]:
@@ -357,7 +392,7 @@ class DNSValidationPipeline:
             Statistics dictionary
         """
         print("=" * 60)
-        print("DNS VALIDATION PIPELINE")
+        print("DNS VALIDATION PIPELINE - OPTIMIZED FOR UNBOUND")
         print("=" * 60)
 
         # Load predictions
@@ -386,16 +421,20 @@ class DNSValidationPipeline:
 
         # Run DNS validation
         print(f"\nValidating {len(gambling_domains)} domains...")
-        print(f"Settings: timeout={self.validator.timeout}s, "
-              f"rate_limit={self.validator.rate_limiter.rate} qps, "
-              f"concurrency={self.validator.semaphore._value}")
+        print(f"Validator settings:")
+        print(f"  - Timeout: {self.validator.timeout}s")
+        print(f"  - Concurrency: {self.validator.semaphore._value}")
+        print(f"  - Max retries: {self.validator.max_retries}")
+        print(f"  - Rate limiting: DISABLED (not needed for local DNS)")
 
         start_time = time.time()
         results = self.validator.validate_batch_sync(gambling_domains)
         elapsed = time.time() - start_time
 
-        print(f"\nCompleted in {elapsed:.2f} seconds")
+        print(f"\n{'='*60}")
+        print(f"Completed in {elapsed:.2f} seconds ({elapsed/60:.1f} minutes)")
         print(f"Average: {len(gambling_domains)/elapsed:.1f} domains/second")
+        print(f"{'='*60}")
 
         # Convert results to DataFrame
         results_data = [asdict(r) for r in results]
@@ -470,14 +509,14 @@ class DNSValidationPipeline:
         active_path = output_dir / 'active_gambling_domains.txt'
         with open(active_path, 'w') as f:
             f.write('\n'.join(active_domains))
-        print(f"Active domains saved to {active_path}")
+        print(f"Active domains saved to {active_path} ({len(active_domains)} domains)")
 
         # Save parked domains list
         parked_domains = [r.domain for r in results if r.is_parked]
         parked_path = output_dir / 'parked_gambling_domains.txt'
         with open(parked_path, 'w') as f:
             f.write('\n'.join(parked_domains))
-        print(f"Parked domains saved to {parked_path}")
+        print(f"Parked domains saved to {parked_path} ({len(parked_domains)} domains)")
 
         # Save statistics
         stats_path = output_dir / 'dns_validation_stats.json'
@@ -509,5 +548,16 @@ class DNSValidationPipeline:
 
 
 if __name__ == '__main__':
-    # This will be called from the validation script
-    pass
+    # Example usage for testing
+    validator = DNSValidator(
+        timeout=10.0,
+        max_retries=2,
+        concurrency=1500
+    )
+    
+    # Test with a few domains
+    test_domains = ['google.com', 'github.com', 'example.com']
+    results = validator.validate_batch_sync(test_domains)
+    
+    for r in results:
+        print(f"{r.domain}: {r.query_status} ({r.query_time:.3f}s)")
