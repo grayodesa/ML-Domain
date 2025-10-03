@@ -53,6 +53,12 @@ def main():
         help='Maximum retry attempts for failed queries (default: 2)'
     )
     parser.add_argument(
+        '--resolver-pool-size',
+        type=int,
+        default=50,
+        help='Number of DNS resolver instances in pool (default: 50)'
+    )
+    parser.add_argument(
         '--no-filter',
         action='store_true',
         help='Do not filter for gambling predictions (use when input already contains only gambling domains)'
@@ -84,22 +90,26 @@ def main():
         timeout = 8.0
         max_retries = 1
         concurrency = 2500
+        resolver_pool_size = 100
     elif args.preset == 'reliable':
         print("🛡️  Using RELIABLE preset (maximum accuracy, slower)")
         timeout = 15.0
         max_retries = 3
         concurrency = 1000
+        resolver_pool_size = 30
     else:  # balanced
         print("⚖️  Using BALANCED preset (optimal speed/accuracy)")
         timeout = args.timeout
         max_retries = args.max_retries
         concurrency = args.concurrency
+        resolver_pool_size = args.resolver_pool_size
 
     # Create validator
     validator = DNSValidator(
         timeout=timeout,
         max_retries=max_retries,
-        concurrency=concurrency
+        concurrency=concurrency,
+        resolver_pool_size=resolver_pool_size
     )
 
     # Create and run pipeline

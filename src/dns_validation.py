@@ -76,7 +76,8 @@ class DNSValidator:
         self,
         timeout: float = 10.0,
         max_retries: int = 2,
-        concurrency: int = 1500  # INCREASED from 100
+        concurrency: int = 1500,  # INCREASED from 100
+        resolver_pool_size: int = 50  # NEW: Pool of resolvers
     ):
         """
         Initialize DNS validator.
@@ -85,11 +86,23 @@ class DNSValidator:
             timeout: Timeout in seconds for DNS queries (increased for reliability)
             max_retries: Maximum retry attempts for failed queries
             concurrency: Maximum concurrent queries (optimized for Unbound)
+            resolver_pool_size: Number of DNS resolver instances in pool
         """
         self.timeout = timeout
         self.max_retries = max_retries
-        # REMOVED: rate_limiter - not needed for local DNS
         self.semaphore = asyncio.Semaphore(concurrency)
+
+        # Create pool of DNS resolvers to avoid resource exhaustion
+        self.resolver_pool = [
+            aiodns.DNSResolver(
+                timeout=self.timeout,
+                nameservers=DNS_SERVERS,
+                tries=1
+            )
+            for _ in range(resolver_pool_size)
+        ]
+        self.resolver_index = 0
+        self.resolver_lock = asyncio.Lock()
 
         # Statistics for monitoring
         self.stats = {
@@ -100,6 +113,13 @@ class DNSValidator:
             'nxdomain': 0
         }
         self.stats_lock = asyncio.Lock()
+
+    async def _get_resolver(self) -> aiodns.DNSResolver:
+        """Get next resolver from pool in round-robin fashion."""
+        async with self.resolver_lock:
+            resolver = self.resolver_pool[self.resolver_index]
+            self.resolver_index = (self.resolver_index + 1) % len(self.resolver_pool)
+            return resolver
 
     def _check_parking_ns(self, ns_records: List[str]) -> Tuple[bool, Optional[str]]:
         """
@@ -216,12 +236,8 @@ class DNSValidator:
 
             for attempt in range(self.max_retries + 1):
                 try:
-                    # Create resolver for this validation
-                    resolver = aiodns.DNSResolver(
-                        timeout=self.timeout,
-                        nameservers=DNS_SERVERS,
-                        tries=1
-                    )
+                    # Get resolver from pool
+                    resolver = await self._get_resolver()
 
                     # Query NS, A, and CNAME records concurrently
                     ns_task = self._query_ns_records(domain, resolver)
