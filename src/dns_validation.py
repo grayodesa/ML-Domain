@@ -90,14 +90,7 @@ class DNSValidator:
         self.max_retries = max_retries
         # REMOVED: rate_limiter - not needed for local DNS
         self.semaphore = asyncio.Semaphore(concurrency)
-        
-        # Create single persistent resolver for better performance
-        self.resolver = aiodns.DNSResolver(
-            timeout=self.timeout,
-            nameservers=DNS_SERVERS,
-            tries=1  # We handle retries ourselves
-        )
-        
+
         # Statistics for monitoring
         self.stats = {
             'queries': 0,
@@ -140,50 +133,53 @@ class DNSValidator:
                 return True, f"IP:{ip}"
         return False, None
 
-    async def _query_ns_records(self, domain: str) -> List[str]:
+    async def _query_ns_records(self, domain: str, resolver: aiodns.DNSResolver) -> List[str]:
         """
         Query NS records for a domain.
 
         Args:
             domain: Domain name to query
+            resolver: aiodns resolver instance
 
         Returns:
             List of nameserver records
         """
         try:
-            result = await self.resolver.query(domain, 'NS')
+            result = await resolver.query(domain, 'NS')
             return [ns.host for ns in result]
         except aiodns.error.DNSError:
             return []
 
-    async def _query_a_records(self, domain: str) -> List[str]:
+    async def _query_a_records(self, domain: str, resolver: aiodns.DNSResolver) -> List[str]:
         """
         Query A records for a domain.
 
         Args:
             domain: Domain name to query
+            resolver: aiodns resolver instance
 
         Returns:
             List of IP addresses
         """
         try:
-            result = await self.resolver.query(domain, 'A')
+            result = await resolver.query(domain, 'A')
             return [r.host for r in result]
         except aiodns.error.DNSError:
             return []
 
-    async def _query_cname_records(self, domain: str) -> List[str]:
+    async def _query_cname_records(self, domain: str, resolver: aiodns.DNSResolver) -> List[str]:
         """
         Query CNAME records for a domain.
 
         Args:
             domain: Domain name to query
+            resolver: aiodns resolver instance
 
         Returns:
             List of CNAME targets
         """
         try:
-            result = await self.resolver.query(domain, 'CNAME')
+            result = await resolver.query(domain, 'CNAME')
             return [r.cname for r in result]
         except aiodns.error.DNSError:
             return []
@@ -212,8 +208,6 @@ class DNSValidator:
             DNSResult object
         """
         async with self.semaphore:
-            # REMOVED: rate limiter await - not needed!
-            
             start_time = time.time()
             ns_records = []
             a_records = []
@@ -222,10 +216,17 @@ class DNSValidator:
 
             for attempt in range(self.max_retries + 1):
                 try:
+                    # Create resolver for this validation
+                    resolver = aiodns.DNSResolver(
+                        timeout=self.timeout,
+                        nameservers=DNS_SERVERS,
+                        tries=1
+                    )
+
                     # Query NS, A, and CNAME records concurrently
-                    ns_task = self._query_ns_records(domain)
-                    a_task = self._query_a_records(domain)
-                    cname_task = self._query_cname_records(domain)
+                    ns_task = self._query_ns_records(domain, resolver)
+                    a_task = self._query_a_records(domain, resolver)
+                    cname_task = self._query_cname_records(domain, resolver)
 
                     ns_records, a_records, cname_records = await asyncio.gather(
                         ns_task, a_task, cname_task,
