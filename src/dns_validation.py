@@ -90,17 +90,11 @@ class DNSValidator:
         """
         self.timeout = timeout
         self.max_retries = max_retries
+        self.resolver_pool_size = resolver_pool_size
         self.semaphore = asyncio.Semaphore(concurrency)
 
-        # Create pool of DNS resolvers to avoid resource exhaustion
-        self.resolver_pool = [
-            aiodns.DNSResolver(
-                timeout=self.timeout,
-                nameservers=DNS_SERVERS,
-                tries=1
-            )
-            for _ in range(resolver_pool_size)
-        ]
+        # Lazy initialization - create resolvers inside event loop
+        self.resolver_pool = None
         self.resolver_index = 0
         self.resolver_lock = asyncio.Lock()
 
@@ -115,8 +109,19 @@ class DNSValidator:
         self.stats_lock = asyncio.Lock()
 
     async def _get_resolver(self) -> aiodns.DNSResolver:
-        """Get next resolver from pool in round-robin fashion."""
+        """Get next resolver from pool in round-robin fashion. Creates pool on first use."""
         async with self.resolver_lock:
+            # Lazy initialization - create pool inside event loop
+            if self.resolver_pool is None:
+                self.resolver_pool = [
+                    aiodns.DNSResolver(
+                        timeout=self.timeout,
+                        nameservers=DNS_SERVERS,
+                        tries=1
+                    )
+                    for _ in range(self.resolver_pool_size)
+                ]
+
             resolver = self.resolver_pool[self.resolver_index]
             self.resolver_index = (self.resolver_index + 1) % len(self.resolver_pool)
             return resolver
