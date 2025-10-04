@@ -9,6 +9,7 @@ import pandas as pd
 from dataclasses import dataclass, asdict
 import aiodns
 import socket
+import ipaddress
 
 
 # Known parking nameservers (from specs and MISP warninglists)
@@ -26,29 +27,49 @@ PARKING_NAMESERVERS_2025 = {
 
 # Known parking IPs (updated 2025)
 PARKING_IPS_2025 = {
-    '3.33.130.190',      # GoDaddy AWS
-    '15.197.148.33',     # GoDaddy AWS
-    '13.248.213.45',     # GoDaddy AWS
-    '50.63.202.32',      # GoDaddy legacy
-    '199.59.242.150',    # Bodis
-    '76.223.26.96',      # Namecheap
-    '75.2.115.196',
-    '75.2.18.233',
-    '13.248.148.254',
-    '76.223.26.96',
-    '199.59.243.228',
-    '185.53.177.52',
-    '185.53.177.50',
-    '185.53.177.54',
-    '208.91.197.27',
-    '185.53.177.53',
-    '185.53.177.51',
-    '185.53.178.50',
-    '91.195.240.12',
-    '23.227.38.65',
-    '15.197.130.221',    
-    '185.53.178.54'
+    '3.33.130.190',      # AWS, 28,700 domains
+    '15.197.148.33',     # AWS, 28,852 domains  
+    '76.223.26.96',      # AWS, 65,965 domains
+    '75.2.115.196',      # AWS, 55,237 domains
+    '75.2.18.233',       # AWS, 40,858 domains
+    '13.248.148.254',    # AWS, 65,617 domains
+    '13.248.213.45',     # AWS, 17,051 domains
+    '76.223.67.189',     # AWS, 17,392 domains
+    '15.197.225.128',    # AWS, 12,464 domains
+    '15.197.130.221',    # AWS, 13,017 domains
+    '13.248.243.5',      # AWS, 11,148 domains
+    '76.223.105.230',    # AWS, 10,939 domains
+    '3.33.251.168',      # AWS, 12,337 domains
+    
+    # Bodis (known parking service)
+    '199.59.243.228',    # Bodis, 37,512 domains
+    
+    # Sedo (parking service)
+    '91.195.240.12',     # Sedo, 21,231 domains
+    '91.195.240.94',     # Sedo, 4,111 domains
+    '64.190.63.222',     # Sedo, 7,805 domains
+    '91.195.240.19',     # Sedo, 5,772 domains
+    
+    # Confluence Networks
+    '208.91.197.27',     # 24,637 domains
+    
+    # Google Cloud (high domain count)
+    '34.149.87.45',      # Google Cloud, 22,064 domains
+    
+    # DigitalOcean (high domain count)
+    '209.38.154.253',    # 16,752 domains
+    
+    # Shopify edge case (already in your list)
+    '23.227.38.65',      # Shopify, 11,954 domains
 }
+
+# Parking IP ranges (CIDR notation)
+PARKING_IP_RANGES_2025 = [
+    '185.53.176.0/22',   # Covers 185.53.176.0 - 185.53.179.255
+]
+
+# Parse CIDR ranges into ip_network objects (done once at module load)
+PARKING_NETWORKS = [ipaddress.ip_network(cidr) for cidr in PARKING_IP_RANGES_2025]
 
 # Local Unbound DNS server
 DNS_SERVERS = [
@@ -145,7 +166,7 @@ class DNSValidator:
 
     def _check_parking_ip(self, a_records: List[str]) -> Tuple[bool, Optional[str]]:
         """
-        Check if A records indicate parking.
+        Check if A records indicate parking (supports individual IPs and CIDR ranges).
 
         Args:
             a_records: List of A records (IP addresses)
@@ -153,9 +174,21 @@ class DNSValidator:
         Returns:
             Tuple of (is_parked, parking_provider)
         """
-        for ip in a_records:
-            if ip in PARKING_IPS_2025:
-                return True, f"IP:{ip}"
+        for ip_str in a_records:
+            # Check individual IPs first (fast set lookup)
+            if ip_str in PARKING_IPS_2025:
+                return True, f"IP:{ip_str}"
+
+            # Check CIDR ranges
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+                for network in PARKING_NETWORKS:
+                    if ip_obj in network:
+                        return True, f"CIDR:{network}"
+            except ValueError:
+                # Invalid IP address, skip
+                pass
+
         return False, None
 
     async def _query_ns_records(self, domain: str, resolver: aiodns.DNSResolver) -> List[str]:
