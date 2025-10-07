@@ -3,6 +3,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
+from scipy.sparse import hstack, csr_matrix
 import re
 import joblib
 from pathlib import Path
@@ -187,6 +188,52 @@ class DomainFeatureExtractor:
 
         print(f"Feature matrix shape: {feature_df.shape}")
         return feature_df
+
+    def create_feature_matrix_sparse(self, domains: List[str], is_training: bool = False):
+        """
+        Create feature matrix for domains using sparse matrices (memory-efficient).
+
+        This method keeps TF-IDF features as sparse matrices instead of converting
+        to dense arrays, dramatically reducing memory usage for large datasets.
+
+        Args:
+            domains: List of domain names
+            is_training: Whether this is training data (affects feature alignment)
+
+        Returns:
+            scipy.sparse matrix in CSR format
+        """
+        # Extract manual features
+        manual_features = []
+        for domain in domains:
+            features = self.extract_features_single(domain)
+            manual_features.append(features)
+
+        manual_df = pd.DataFrame(manual_features)
+        manual_df = manual_df.fillna(0)
+
+        # Align columns with training data
+        if is_training or self.manual_feature_names is None:
+            self.manual_feature_names = manual_df.columns.tolist()
+        else:
+            for col in self.manual_feature_names:
+                if col not in manual_df.columns:
+                    manual_df[col] = 0
+            manual_df = manual_df[self.manual_feature_names]
+
+        # Convert manual features to sparse matrix
+        manual_sparse = csr_matrix(manual_df.values)
+
+        # Extract TF-IDF features (already sparse)
+        if self.tfidf_vectorizer is None:
+            raise ValueError("TF-IDF vectorizer not fitted. Call fit_tfidf first.")
+
+        tfidf_sparse = self.tfidf_vectorizer.transform(domains)
+
+        # Combine sparse matrices horizontally
+        combined_sparse = hstack([manual_sparse, tfidf_sparse], format='csr')
+
+        return combined_sparse
 
     def save(self, path: Path):
         """Save the feature extractor."""

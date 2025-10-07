@@ -24,14 +24,29 @@ def main():
                        help='Output directory for predictions')
     parser.add_argument('--confidence', type=float, default=0.8,
                        help='Confidence threshold for filtering')
+    parser.add_argument('--batch-size', type=int, default=None,
+                       help='Batch size for chunked processing (default: 50000)')
+    parser.add_argument('--chunked', action='store_true',
+                       help='Force chunked processing (auto-enabled for >100k domains)')
+    parser.add_argument('--no-chunked', action='store_true',
+                       help='Disable chunked processing (not recommended for large datasets)')
     args = parser.parse_args()
+
+    # Handle chunked flag
+    use_chunked = None
+    if args.chunked:
+        use_chunked = True
+    elif args.no_chunked:
+        use_chunked = False
 
     run_inference(
         input_file=Path(args.input),
         model_path=Path(args.model_path),
         output_dir=Path(args.output_dir),
         confidence_threshold=args.confidence,
-        model_type=args.model_type
+        model_type=args.model_type,
+        batch_size=args.batch_size,
+        use_chunked=use_chunked
     )
 
 
