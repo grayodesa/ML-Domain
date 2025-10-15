@@ -71,6 +71,23 @@ def main():
         default='balanced',
         help='Performance preset: balanced (default), fast (max speed), reliable (max accuracy)'
     )
+    # NEW: Chunked processing parameters
+    parser.add_argument(
+        '--chunk-size',
+        type=int,
+        default=None,
+        help='Chunk size for batch processing (default: 10000, auto-detect based on dataset size)'
+    )
+    parser.add_argument(
+        '--use-chunked',
+        action='store_true',
+        help='Force chunked processing even for small datasets'
+    )
+    parser.add_argument(
+        '--no-chunked',
+        action='store_true',
+        help='Disable chunked processing even for large datasets'
+    )
 
     args = parser.parse_args()
 
@@ -115,16 +132,26 @@ def main():
     # Create and run pipeline
     pipeline = DNSValidationPipeline(validator)
 
+    # Determine chunked processing setting
+    use_chunked = None
+    if args.use_chunked:
+        use_chunked = True
+    elif args.no_chunked:
+        use_chunked = False
+    # Otherwise None = auto-detect based on size
+
     try:
         print(f"\n📊 Input: {input_file}")
         print(f"📁 Output: {output_dir}")
         print(f"🎯 Confidence threshold: {args.confidence_threshold}")
-        
+
         stats = pipeline.run(
             predictions_file=input_file,
             output_dir=output_dir,
             confidence_threshold=args.confidence_threshold,
-            filter_gambling=not args.no_filter
+            filter_gambling=not args.no_filter,
+            chunk_size=args.chunk_size,
+            use_chunked=use_chunked
         )
 
         if stats:

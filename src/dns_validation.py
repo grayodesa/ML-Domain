@@ -402,6 +402,88 @@ class DNSValidator:
         
         return results
 
+    async def validate_batch_chunked(
+        self,
+        domains: List[str],
+        chunk_size: int = 10000,
+        output_path: Optional[Path] = None
+    ) -> List[DNSResult]:
+        """
+        Validate domains in chunks to manage memory efficiently.
+
+        Memory-efficient for large datasets (100k+ domains) by processing in chunks
+        and optionally writing results incrementally to disk.
+
+        Args:
+            domains: List of domains to validate
+            chunk_size: Number of domains to process per chunk (default 10000)
+            output_path: If provided, results are written incrementally to this CSV file
+
+        Returns:
+            List of DNSResult objects (may be empty if output_path is used)
+        """
+        from tqdm import tqdm
+
+        total = len(domains)
+        num_chunks = (total + chunk_size - 1) // chunk_size
+
+        print(f"\nStarting chunked validation of {total:,} domains...")
+        print(f"Chunk size: {chunk_size:,} domains per chunk")
+        print(f"Total chunks: {num_chunks}")
+        print(f"Concurrency: {self.semaphore._value}")
+        print(f"Timeout: {self.timeout}s")
+
+        start_time = time.time()
+        all_results = []
+        first_chunk = True
+
+        # Process each chunk
+        for chunk_idx in tqdm(range(num_chunks), desc="Processing chunks", unit="chunk"):
+            chunk_start = chunk_idx * chunk_size
+            chunk_end = min(chunk_start + chunk_size, total)
+            chunk_domains = domains[chunk_start:chunk_end]
+
+            # Validate chunk
+            chunk_results = await self.validate_batch(chunk_domains)
+
+            # Write incrementally to disk if output path provided
+            if output_path:
+                # Convert to DataFrame for CSV writing
+                chunk_data = [asdict(r) for r in chunk_results]
+                chunk_df = pd.DataFrame(chunk_data)
+
+                # Convert lists to JSON strings for CSV
+                chunk_df['ns_records'] = chunk_df['ns_records'].apply(json.dumps)
+                chunk_df['a_records'] = chunk_df['a_records'].apply(json.dumps)
+                chunk_df['cname_records'] = chunk_df['cname_records'].apply(json.dumps)
+
+                # Write to CSV incrementally
+                chunk_df.to_csv(
+                    output_path,
+                    mode='w' if first_chunk else 'a',
+                    header=first_chunk,
+                    index=False
+                )
+                first_chunk = False
+                # Don't accumulate results in memory
+            else:
+                all_results.extend(chunk_results)
+
+        elapsed = time.time() - start_time
+        final_qps = total / elapsed if elapsed > 0 else 0
+
+        print(f"\n✅ Chunked validation complete!")
+        print(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f}m)")
+        print(f"Average QPS: {final_qps:.0f}")
+        print(f"Success rate: {self.stats['success']/total*100:.1f}%")
+
+        # Return combined results or empty list if written to disk
+        if output_path:
+            print(f"Results written incrementally to {output_path}")
+            return []
+        else:
+            return all_results
+
     def validate_batch_sync(self, domains: List[str]) -> List[DNSResult]:
         """
         Synchronous wrapper for validate_batch.
@@ -413,6 +495,25 @@ class DNSValidator:
             List of DNSResult objects
         """
         return asyncio.run(self.validate_batch(domains))
+
+    def validate_batch_chunked_sync(
+        self,
+        domains: List[str],
+        chunk_size: int = 10000,
+        output_path: Optional[Path] = None
+    ) -> List[DNSResult]:
+        """
+        Synchronous wrapper for validate_batch_chunked.
+
+        Args:
+            domains: List of domains to validate
+            chunk_size: Number of domains to process per chunk
+            output_path: If provided, results are written incrementally to this CSV file
+
+        Returns:
+            List of DNSResult objects (may be empty if output_path is used)
+        """
+        return asyncio.run(self.validate_batch_chunked(domains, chunk_size, output_path))
 
 
 class DNSValidationPipeline:
@@ -432,7 +533,9 @@ class DNSValidationPipeline:
         predictions_file: Path,
         output_dir: Path,
         confidence_threshold: float = 0.8,
-        filter_gambling: bool = True
+        filter_gambling: bool = True,
+        chunk_size: int = None,
+        use_chunked: bool = None
     ) -> Dict:
         """
         Run DNS validation pipeline.
@@ -442,6 +545,8 @@ class DNSValidationPipeline:
             output_dir: Directory for output files
             confidence_threshold: Minimum confidence to validate
             filter_gambling: If True, filter for gambling predictions; if False, validate all
+            chunk_size: Chunk size for chunked processing (default: 10000)
+            use_chunked: Force chunked processing. If None, auto-detect based on dataset size
 
         Returns:
             Statistics dictionary
@@ -474,8 +579,20 @@ class DNSValidationPipeline:
             print("\nNo gambling domains to validate!")
             return {}
 
+        # Auto-detect whether to use chunked processing
+        if use_chunked is None:
+            # Use chunked processing for datasets > 50k domains
+            use_chunked = len(gambling_domains) > 50000
+
+        # Set default chunk size
+        if chunk_size is None:
+            chunk_size = 10000
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        results_path = output_dir / 'dns_validation.csv'
+
         # Run DNS validation
-        print(f"\nValidating {len(gambling_domains)} domains...")
+        print(f"\nValidating {len(gambling_domains):,} domains...")
         print(f"Validator settings:")
         print(f"  - Timeout: {self.validator.timeout}s")
         print(f"  - Concurrency: {self.validator.semaphore._value}")
@@ -483,29 +600,65 @@ class DNSValidationPipeline:
         print(f"  - Rate limiting: DISABLED (not needed for local DNS)")
 
         start_time = time.time()
-        results = self.validator.validate_batch_sync(gambling_domains)
-        elapsed = time.time() - start_time
 
-        print(f"\n{'='*60}")
-        print(f"Completed in {elapsed:.2f} seconds ({elapsed/60:.1f} minutes)")
-        print(f"Average: {len(gambling_domains)/elapsed:.1f} domains/second")
-        print(f"{'='*60}")
+        if use_chunked:
+            print(f"\nUsing chunked processing (chunk_size={chunk_size:,})")
+            print("Results will be written incrementally to disk to save memory.\n")
 
-        # Convert results to DataFrame
-        results_data = [asdict(r) for r in results]
-        results_df = pd.DataFrame(results_data)
+            # Use chunked validation with incremental CSV writing
+            results = self.validator.validate_batch_chunked_sync(
+                gambling_domains,
+                chunk_size=chunk_size,
+                output_path=results_path
+            )
 
-        # Convert lists to JSON strings for CSV
-        results_df['ns_records'] = results_df['ns_records'].apply(json.dumps)
-        results_df['a_records'] = results_df['a_records'].apply(json.dumps)
-        results_df['cname_records'] = results_df['cname_records'].apply(json.dumps)
+            elapsed = time.time() - start_time
 
-        # Calculate statistics
-        stats = self._calculate_stats(results)
+            print(f"\n{'='*60}")
+            print(f"Completed in {elapsed:.2f} seconds ({elapsed/60:.1f} minutes)")
+            print(f"Average: {len(gambling_domains)/elapsed:.1f} domains/second")
+            print(f"{'='*60}")
 
-        # Save outputs
-        output_dir.mkdir(parents=True, exist_ok=True)
-        self._save_outputs(results, results_df, stats, output_dir)
+            print(f"\nFull results saved to {results_path}")
+
+            # Calculate statistics from file in streaming fashion
+            print("\nCalculating statistics from saved results...")
+            stats = self._calculate_stats_from_file(results_path, len(gambling_domains))
+
+            # Extract and save domain lists from CSV in streaming fashion
+            self._save_domain_lists_from_file(results_path, output_dir)
+
+        else:
+            print("\nUsing standard batch processing (all in memory)\n")
+
+            results = self.validator.validate_batch_sync(gambling_domains)
+            elapsed = time.time() - start_time
+
+            print(f"\n{'='*60}")
+            print(f"Completed in {elapsed:.2f} seconds ({elapsed/60:.1f} minutes)")
+            print(f"Average: {len(gambling_domains)/elapsed:.1f} domains/second")
+            print(f"{'='*60}")
+
+            # Convert results to DataFrame
+            results_data = [asdict(r) for r in results]
+            results_df = pd.DataFrame(results_data)
+
+            # Convert lists to JSON strings for CSV
+            results_df['ns_records'] = results_df['ns_records'].apply(json.dumps)
+            results_df['a_records'] = results_df['a_records'].apply(json.dumps)
+            results_df['cname_records'] = results_df['cname_records'].apply(json.dumps)
+
+            # Calculate statistics
+            stats = self._calculate_stats(results)
+
+            # Save outputs
+            self._save_outputs(results, results_df, stats, output_dir)
+
+        # Save statistics
+        stats_path = output_dir / 'dns_validation_stats.json'
+        with open(stats_path, 'w') as f:
+            json.dump(stats, f, indent=2)
+        print(f"Statistics saved to {stats_path}")
 
         # Print summary
         self._print_summary(stats)
@@ -545,6 +698,108 @@ class DNSValidationPipeline:
             'avg_query_time': avg_query_time,
             'parking_providers': parking_providers
         }
+
+    def _calculate_stats_from_file(self, csv_path: Path, total_domains: int) -> Dict:
+        """
+        Calculate statistics from CSV file in streaming fashion.
+
+        Memory-efficient for large result files by processing in chunks.
+
+        Args:
+            csv_path: Path to DNS validation results CSV
+            total_domains: Total number of domains validated
+
+        Returns:
+            Statistics dictionary
+        """
+        # Initialize counters
+        active = 0
+        parked = 0
+        success = 0
+        timeout = 0
+        nxdomain = 0
+        error = 0
+        total_query_time = 0.0
+        parking_providers = {}
+
+        # Process CSV in chunks
+        chunk_size = 10000
+        for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
+            # Count statuses
+            success += (chunk['query_status'] == 'success').sum()
+            timeout += (chunk['query_status'] == 'timeout').sum()
+            nxdomain += (chunk['query_status'] == 'nxdomain').sum()
+            error += chunk['query_status'].str.startswith('error').sum()
+
+            # Count active and parked
+            active += ((chunk['is_parked'] == False) & (chunk['query_status'] == 'success')).sum()
+            parked += (chunk['is_parked'] == True).sum()
+
+            # Accumulate query times
+            total_query_time += chunk['query_time'].sum()
+
+            # Count parking providers
+            parked_chunk = chunk[chunk['is_parked'] == True]
+            for provider in parked_chunk['parking_provider'].dropna():
+                parking_providers[provider] = parking_providers.get(provider, 0) + 1
+
+        avg_query_time = total_query_time / total_domains if total_domains > 0 else 0
+
+        return {
+            'total_domains': total_domains,
+            'active_domains': int(active),
+            'parked_domains': int(parked),
+            'successful_queries': int(success),
+            'timeout_queries': int(timeout),
+            'nxdomain_queries': int(nxdomain),
+            'error_queries': int(error),
+            'success_rate_pct': (success / total_domains * 100) if total_domains > 0 else 0,
+            'parking_rate_pct': (parked / success * 100) if success > 0 else 0,
+            'active_rate_pct': (active / success * 100) if success > 0 else 0,
+            'avg_query_time': avg_query_time,
+            'parking_providers': parking_providers
+        }
+
+    def _save_domain_lists_from_file(self, csv_path: Path, output_dir: Path):
+        """
+        Extract and save active/parked domain lists from CSV in streaming fashion.
+
+        Memory-efficient for large result files by processing in chunks.
+
+        Args:
+            csv_path: Path to DNS validation results CSV
+            output_dir: Directory for output files
+        """
+        active_path = output_dir / 'active_gambling_domains.txt'
+        parked_path = output_dir / 'parked_gambling_domains.txt'
+
+        # Open output files
+        with open(active_path, 'w') as active_file, open(parked_path, 'w') as parked_file:
+            active_count = 0
+            parked_count = 0
+
+            # Process CSV in chunks
+            chunk_size = 10000
+            for chunk in pd.read_csv(csv_path, chunksize=chunk_size):
+                # Extract active domains
+                active_domains = chunk[
+                    (chunk['is_parked'] == False) & (chunk['query_status'] == 'success')
+                ]['domain'].tolist()
+
+                # Extract parked domains
+                parked_domains = chunk[chunk['is_parked'] == True]['domain'].tolist()
+
+                # Write to files
+                if active_domains:
+                    active_file.write('\n'.join(active_domains) + '\n')
+                    active_count += len(active_domains)
+
+                if parked_domains:
+                    parked_file.write('\n'.join(parked_domains) + '\n')
+                    parked_count += len(parked_domains)
+
+        print(f"Active domains saved to {active_path} ({active_count:,} domains)")
+        print(f"Parked domains saved to {parked_path} ({parked_count:,} domains)")
 
     def _save_outputs(
         self,
