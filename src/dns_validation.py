@@ -423,9 +423,16 @@ class DNSValidator:
             List of DNSResult objects (may be empty if output_path is used)
         """
         from tqdm import tqdm
+        import gc
 
         total = len(domains)
         num_chunks = (total + chunk_size - 1) // chunk_size
+
+        # Warn about oversized chunks
+        if chunk_size > 50000:
+            print(f"\n⚠️  WARNING: Chunk size {chunk_size:,} is very large!")
+            print(f"   Recommended: 5,000-15,000 domains per chunk")
+            print(f"   Large chunks may cause memory issues")
 
         print(f"\nStarting chunked validation of {total:,} domains...")
         print(f"Chunk size: {chunk_size:,} domains per chunk")
@@ -465,9 +472,22 @@ class DNSValidator:
                     index=False
                 )
                 first_chunk = False
-                # Don't accumulate results in memory
+
+                # CRITICAL: Free memory immediately after writing
+                del chunk_results
+                del chunk_data
+                del chunk_df
             else:
                 all_results.extend(chunk_results)
+                del chunk_results
+
+            # CRITICAL: Force garbage collection between chunks
+            gc.collect()
+
+            # CRITICAL: Clear DNS resolver pool to release connections
+            async with self.resolver_lock:
+                if self.resolver_pool is not None:
+                    self.resolver_pool = None
 
         elapsed = time.time() - start_time
         final_qps = total / elapsed if elapsed > 0 else 0

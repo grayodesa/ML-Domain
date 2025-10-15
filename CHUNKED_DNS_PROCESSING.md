@@ -217,6 +217,24 @@ python scripts/04_validate_dns.py --input predictions.csv --no-chunked
 
 **Formula:** `chunk_size ≈ concurrency × 7` (average ~7 seconds per chunk)
 
+**⚠️ CRITICAL WARNING: Do NOT use chunk sizes >50,000!**
+- Chunks >50k defeat the entire memory management purpose
+- Each chunk loads ALL its domains into memory simultaneously
+- Memory accumulation still occurs with oversized chunks
+- **Recommended maximum: 20,000 domains per chunk**
+- **Best practice: 5,000-15,000 domains per chunk**
+
+### Memory Management (Added in Latest Update)
+
+The chunked implementation now includes aggressive memory cleanup:
+
+1. **Explicit Memory Deallocation**: `del` statements immediately after CSV writes
+2. **Forced Garbage Collection**: `gc.collect()` called between chunks
+3. **DNS Resolver Pool Clearing**: Connection pool reset between chunks to release resources
+4. **Chunk Size Validation**: Warnings displayed for chunks >50k domains
+
+These mechanisms ensure memory is actually freed between chunks rather than accumulating.
+
 ---
 
 ## Code Quality
