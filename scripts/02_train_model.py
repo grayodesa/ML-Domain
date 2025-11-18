@@ -19,7 +19,7 @@ def main():
         '--model',
         type=str,
         choices=['logistic', 'random_forest'],
-        default='logistic',
+        default='random_forest',
         help='Model type to train (default: logistic)'
     )
     parser.add_argument('--tune-hyperparams', action='store_true',

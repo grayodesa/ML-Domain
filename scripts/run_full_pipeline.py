@@ -2,6 +2,7 @@
 """Run the complete training pipeline."""
 
 import sys
+import argparse
 from pathlib import Path
 import pandas as pd
 
@@ -14,13 +15,42 @@ from src.model_training import GamblingDomainClassifier
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description='Run complete training pipeline for gambling domain classifier'
+    )
+    parser.add_argument(
+        '--gambling-file',
+        type=str,
+        help='Path to local txt file with additional gambling domains (one per line)'
+    )
+    parser.add_argument(
+        '--benign-file',
+        type=str,
+        help='Path to local CSV/txt file with benign domains (supports Tranco format: rank,domain)'
+    )
+
+    args = parser.parse_args()
+
+    # Convert to Path if provided
+    gambling_file = Path(args.gambling_file) if args.gambling_file else None
+    benign_file = Path(args.benign_file) if args.benign_file else None
+
+    # Validate files exist if provided
+    if gambling_file and not gambling_file.exists():
+        print(f"Error: File not found: {gambling_file}")
+        sys.exit(1)
+
+    if benign_file and not benign_file.exists():
+        print(f"Error: File not found: {benign_file}")
+        sys.exit(1)
+
     print("=" * 60)
     print("GAMBLING DOMAIN CLASSIFIER - FULL PIPELINE")
     print("=" * 60)
 
     # Step 1: Data Collection
     print("\n### STEP 1: DATA COLLECTION ###")
-    train_df, test_df = collect_data()
+    train_df, test_df = collect_data(gambling_file=gambling_file, benign_file=benign_file)
 
     # Step 2: Feature Engineering
     print("\n### STEP 2: FEATURE ENGINEERING ###")

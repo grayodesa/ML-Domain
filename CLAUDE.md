@@ -22,7 +22,9 @@ Model Evaluation → Inference → DNS Validation → Results Analysis
 
 1. **Data Collection Module** (`src/data_collection.py`)
    - Fetches gambling domains from BlockList Project and Hagezi
+   - Supports loading additional gambling domains from local txt files
    - Collects benign domains from Cloudflare Radar and Tranco
+   - Supports loading benign domains from local CSV/txt files (Tranco format supported)
    - Handles deduplication and domain validation
    - Creates 80/20 train/test split
 
@@ -72,6 +74,18 @@ pip install -r requirements.txt
 ```bash
 # Step 1: Collect training data
 python scripts/01_collect_data.py
+
+# Step 1 (with custom data sources):
+# - Gambling domains from local txt file
+python scripts/01_collect_data.py --gambling-file data/raw/verified_casinos.txt
+
+# - Benign domains from local CSV file (Tranco format: rank,domain)
+python scripts/01_collect_data.py --benign-file data/raw/benign_domains.csv
+
+# - Both custom gambling and benign domains
+python scripts/01_collect_data.py \
+  --gambling-file data/raw/verified_casinos.txt \
+  --benign-file data/raw/benign_domains.csv
 
 # Step 2: Train model with hyperparameter tuning
 

@@ -25,11 +25,79 @@ Or run steps individually:
 # Step 1: Collect data
 python scripts/01_collect_data.py
 
+# Step 1 (with additional local gambling domains):
+python scripts/01_collect_data.py --gambling-file data/raw/verified_casinos.txt
+
 # Step 2: Train model (with hyperparameter tuning)
 python scripts/02_train_model.py --tune-hyperparams
 
 # Step 3: Run inference on unlabeled domains
 python scripts/03_run_inference.py --input data/raw/test_domains.txt
+```
+
+### Adding Custom Data Sources
+
+You can supplement the default data sources with your own domain lists:
+
+#### Custom Gambling Domains
+
+```bash
+# Create a text file with one domain per line
+# Example: data/raw/verified_casinos.txt
+# casino-online.com
+# best-poker-site.net
+# sports-betting.io
+
+# Run data collection with your custom file
+python scripts/01_collect_data.py --gambling-file data/raw/verified_casinos.txt
+```
+
+**Format requirements for gambling domain files:**
+- One domain per line
+- Plain text file (UTF-8 encoding)
+- Comments starting with `#` are ignored
+- Empty lines are ignored
+- Domains will be automatically cleaned and validated
+
+#### Custom Benign Domains
+
+```bash
+# CSV format (Tranco-style: rank,domain)
+# Example: data/raw/benign_domains.csv
+# 1,google.com
+# 2,youtube.com
+# 3,facebook.com
+
+# Or simple text format (one domain per line)
+# Example: data/raw/benign_domains.txt
+# google.com
+# youtube.com
+# facebook.com
+
+# Run data collection with your custom benign domains
+python scripts/01_collect_data.py --benign-file data/raw/benign_domains.csv
+```
+
+**Format requirements for benign domain files:**
+- Supports both CSV and TXT formats
+- CSV format: `rank,domain` or just `domain`
+- TXT format: one domain per line
+- Comments starting with `#` are ignored
+- Gambling keywords are automatically filtered out
+- Domains will be automatically cleaned and validated
+
+#### Using Both Custom Sources
+
+```bash
+# Run with both custom gambling and benign domains
+python scripts/01_collect_data.py \
+  --gambling-file data/raw/verified_casinos.txt \
+  --benign-file data/raw/benign_domains.csv
+
+# Or run the full pipeline with custom domains
+python scripts/run_full_pipeline.py \
+  --gambling-file data/raw/verified_casinos.txt \
+  --benign-file data/raw/benign_domains.csv
 ```
 
 ## Project Structure
